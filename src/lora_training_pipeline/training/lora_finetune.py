@@ -76,8 +76,18 @@ def prepare_data(clean_data: pd.DataFrame):
         (as Hugging Face `Dataset` objects).
     """
     dataset = Dataset.from_pandas(clean_data)  # Convert DataFrame to Hugging Face Dataset
-    train_dataset, temp_dataset = train_test_split(dataset, test_size=0.1, random_state=42)  # 90/10 split
-    validation_dataset, test_dataset = train_test_split(temp_dataset, test_size=0.5, random_state=42) # Split remaining data
+
+    # Use the built-in Hugging Face Dataset splitting utility instead of
+    # scikit-learn's train_test_split.  This avoids an unnecessary dependency
+    # and works directly with Dataset objects.
+    splits = dataset.train_test_split(test_size=0.1, seed=42)
+    train_dataset = splits["train"]
+    temp_dataset = splits["test"]
+
+    temp_splits = temp_dataset.train_test_split(test_size=0.5, seed=42)
+    validation_dataset = temp_splits["train"]
+    test_dataset = temp_splits["test"]
+
     return train_dataset, validation_dataset, test_dataset
 
 class LoraFinetuneModule(L.LightningModule): # Changed to L.LightningModule
