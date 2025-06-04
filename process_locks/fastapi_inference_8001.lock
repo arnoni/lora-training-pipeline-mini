@@ -1,0 +1,12 @@
+{
+  "pid": 22156,
+  "timestamp": "2025-05-25T12:08:25.214446",
+  "hostname": "ArnonLegion",
+  "process_type": "fastapi_inference",
+  "port": 8001,
+  "command": ".\\run_pipeline.py",
+  "python_executable": "C:\\Users\\arnon\\Documents\\dev\\projects\\incoming\\LoRA_Training_Pipeline\\.venv\\Scripts\\python.exe",
+  "model_path": "output\\best_model",
+  "update_signal": ".model_update",
+  "start_timestamp": "2025-05-25T12:08:24.164657"
+}

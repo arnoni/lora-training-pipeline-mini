@@ -1,0 +1,9 @@
+{
+  "pid": 44712,
+  "timestamp": "2025-05-22T12:28:16.445949",
+  "hostname": "ArnonLegion",
+  "process_type": "gradio_inference_ui",
+  "port": 7861,
+  "command": ".\\run_pipeline.py",
+  "python_executable": "C:\\Users\\arnon\\Documents\\dev\\projects\\incoming\\LoRA_Training_Pipeline\\.venv\\Scripts\\python.exe"
+}

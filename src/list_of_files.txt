@@ -1,0 +1,42 @@
+Under LoRA_Training_Pipeline/src/data_collection/
+gradio_app.py
+
+Under LoRA_Training_Pipeline/src/data_cleaning/
+clean_filter.py
+
+
+Under LoRA_Training_Pipeline/src/training/
+zenml_pipeline.py
+
+Under LoRA_Training_Pipeline/src/training/
+lora_finetune.py
+
+Under LoRA_Training_Pipeline/src/inference/
+
+fastapi_inference.py
+
+Under LoRA_Training_Pipeline/src/utils/
+helpers.py
+
+
+Under LoRA_Training_Pipeline/
+
+pyproject.toml
+
+
+Under LoRA_Training_Pipeline/build/
+
+docker-compose.yml
+
+Under LoRA_Training_Pipeline/build/
+
+Dockerfile
+
+
+
+
+
+
+
+
+

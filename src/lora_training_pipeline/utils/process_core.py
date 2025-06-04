@@ -1,0 +1,1659 @@
+#!/usr/bin/env python
+# LoRA_Training_Pipeline/src/lora_training_pipeline/utils/process_core.py
+"""
+Core process management utilities for the LoRA Training Pipeline.
+
+This module provides the foundational components for managing processes,
+including cross-platform file locking, PID file handling, port management,
+and process verification. It aims to consolidate the various process
+management utilities scattered across multiple files.
+
+Key components:
+- FileLock: Cross-platform file locking using atomic operations
+- PidFile: Standardized PID file handling with schema validation
+- PortManager: Port availability checking and conflict resolution
+- ProcessVerifier: Process existence and health verification
+"""
+
+import os
+import sys
+import json
+import time
+import socket
+import tempfile
+import shutil
+import signal
+import subprocess
+import threading
+import datetime
+import logging
+import atexit
+from pathlib import Path
+import uuid
+import traceback
+from typing import Dict, List, Optional, Tuple, Union, Any, Callable
+
+# Set up logging
+logger = logging.getLogger(__name__)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler = logging.FileHandler('./process_core.log')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+logger.setLevel(logging.DEBUG)
+
+# Setup process management logging
+# We'll use a function to get the log file to handle fallback scenarios
+def get_log_file():
+    """Get the log file path with fallback to temp directory if needed."""
+    log_file = Path('./process_management.log')
+
+    # Ensure parent directory exists
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        # If we can't create/access the directory, use a temp directory
+        temp_dir = Path(tempfile.gettempdir())
+        fallback_file = temp_dir / 'process_management_fallback.log'
+        print(f"[DEBUG] Log directory access error type: {type(e).__name__}", file=sys.stderr)
+        print(f"[DEBUG] Log directory access error details: {e}", file=sys.stderr)
+        print(f"[PROCESS-CORE-ERROR] Failed to access log directory {log_file.parent}: {e}", file=sys.stderr)
+        print(f"[PROCESS-CORE-ERROR] Using fallback log file: {fallback_file}", file=sys.stderr)
+        return fallback_file
+
+    return log_file
+
+# Enable debug mode through environment variable
+DEBUG_MODE = os.environ.get("DEBUG_PROCESS_MANAGEMENT", "false").lower() in ("true", "1", "yes")
+# Enable trace mode for even more detailed logging
+TRACE_MODE = os.environ.get("TRACE_PROCESS_MANAGEMENT", "false").lower() in ("true", "1", "yes")
+
+def debug_print(*args, **kwargs):
+    """Print debug information only when DEBUG_MODE is enabled."""
+    message = " ".join(str(arg) for arg in args)
+    if DEBUG_MODE:
+        logger.debug(message)
+        print("[PROCESS-CORE-DEBUG]", *args, **kwargs)
+
+def trace_print(*args, **kwargs):
+    """Print trace information only when TRACE_MODE is enabled."""
+    if TRACE_MODE:
+        message = " ".join(str(arg) for arg in args)
+        logger.debug(f"[TRACE] {message}")
+        print("[PROCESS-CORE-TRACE]", *args, **kwargs)
+
+def error_print(*args, **kwargs):
+    """Print error information regardless of debug mode."""
+    message = " ".join(str(arg) for arg in args)
+    logger.error(message)
+    print("[PROCESS-CORE-ERROR]", *args, file=sys.stderr, **kwargs)
+
+def log_event(event_type, details):
+    """
+    Log process management events to a dedicated log file.
+
+    Args:
+        event_type: Type of event (e.g., 'LOCK_ACQUIRED', 'LOCK_DENIED')
+        details: Dictionary of event details
+    """
+    try:
+        # Validate inputs
+        if not event_type or not isinstance(event_type, str):
+            error_print(f"Invalid event type for logging: {event_type!r}")
+            return
+
+        if details is None:
+            details = {}
+        elif not isinstance(details, dict):
+            error_print(f"Invalid details type for logging: {type(details)}, should be dict")
+            # Try to convert to dict if possible
+            try:
+                details = {"data": details}
+            except Exception as conv_err:
+                print(f"[DEBUG] Details conversion error type: {type(conv_err).__name__}", file=sys.stderr)
+                print(f"[DEBUG] Details conversion error details: {conv_err}", file=sys.stderr)
+                details = {"error": "Invalid details object"}
+
+        timestamp = datetime.datetime.now().isoformat()
+        log_entry = {
+            "timestamp": timestamp,
+            "type": event_type,
+            "pid": os.getpid(),
+            "process_name": os.environ.get("PROCESS_NAME", "unknown"),
+            "hostname": socket.gethostname(),
+            "details": details
+        }
+
+        # Get the log file path (with fallback handling)
+        log_file = get_log_file()
+
+        # Use atomic write to append the log
+        temp_file = None
+        try:
+            temp_path = None
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                dir=log_file.parent,
+                delete=False,
+                suffix='.tmp'
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+                if log_file.exists():
+                    # Append to existing file
+                    with open(log_file, 'r') as src:
+                        content = src.read()
+                        temp_file.write(content)
+                        if content and not content.endswith('\n'):
+                            temp_file.write('\n')
+
+                # Add new log entry
+                json.dump(log_entry, temp_file)
+                temp_file.write("\n")
+                temp_file.flush()
+
+            # Atomic rename
+            if temp_path:
+                shutil.move(temp_path, log_file)
+                debug_print(f"Logged {event_type} event: {details}")
+                trace_print(f"Log entry: {log_entry}")
+        except Exception as e:
+            error_print(f"Failed to write log entry: {e}")
+            if temp_file and Path(temp_file.name).exists():
+                try:
+                    Path(temp_file.name).unlink()
+                except Exception as temp_cleanup_err:
+                    print(f"[DEBUG] Temp file cleanup error type: {type(temp_cleanup_err).__name__}", file=sys.stderr)
+                    print(f"[DEBUG] Temp file cleanup error details: {temp_cleanup_err}", file=sys.stderr)
+                    pass
+
+            # Try direct append as last resort
+            try:
+                with open(log_file, 'a') as f:
+                    f.write(json.dumps(log_entry) + "\n")
+                debug_print(f"Logged {event_type} event with direct append after atomic write failure")
+            except Exception as e2:
+                print(f"[DEBUG] Final logging attempt error type: {type(e2).__name__}", file=sys.stderr)
+                print(f"[DEBUG] Final logging attempt error details: {e2}", file=sys.stderr)
+                error_print(f"Final logging attempt failed: {e2}")
+                # Log to stderr as absolute last resort
+                print(f"CRITICAL: Failed to log event {event_type}. Error chain: {e} -> {e2}", file=sys.stderr)
+    except Exception as e:
+        error_print(f"Error logging event: {e}")
+        print(f"CRITICAL: Event logging failed: {e}", file=sys.stderr)
+        if DEBUG_MODE:
+            error_print(traceback.format_exc())
+
+# PID file schema for validation
+PID_FILE_SCHEMA = {
+    "type": "object",
+    "required": ["pid", "timestamp"],
+    "properties": {
+        "pid": {"type": "integer", "minimum": 1},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "hostname": {"type": "string"},
+        "command": {"type": "string"},
+        "process_type": {"type": "string"},
+        "port": {"type": ["integer", "string"]},
+        "metadata": {"type": "object"}
+    },
+    "additionalProperties": True
+}
+
+def is_wsl() -> bool:
+    """
+    Detect if running in Windows Subsystem for Linux.
+    Returns True if running in WSL, False otherwise.
+    """
+    if not sys.platform.startswith('linux'):
+        return False
+    
+    # Check for microsoft in /proc/version
+    try:
+        with open('/proc/version', 'r') as f:
+            return 'microsoft' in f.read().lower()
+    except Exception as proc_err:
+        print(f"[DEBUG] Proc version read error type: {type(proc_err).__name__}", file=sys.stderr)
+        print(f"[DEBUG] Proc version read error details: {proc_err}", file=sys.stderr)
+        # If we can't read /proc/version, try another method
+        try:
+            with open('/proc/sys/kernel/osrelease', 'r') as f:
+                return 'microsoft' in f.read().lower() or 'wsl' in f.read().lower()
+        except Exception as osrelease_err:
+            print(f"[DEBUG] OS release read error type: {type(osrelease_err).__name__}", file=sys.stderr)
+            print(f"[DEBUG] OS release read error details: {osrelease_err}", file=sys.stderr)
+            return False
+
+def is_process_running(pid: int) -> bool:
+    """
+    Check if a process with the given PID is running.
+
+    This is a cross-platform implementation that works on Windows, Linux, macOS and WSL.
+
+    Args:
+        pid: Process ID to check
+
+    Returns:
+        bool: True if process is running, False otherwise
+    """
+    trace_print(f"Checking if process {pid} is running")
+
+    # Validate PID
+    if not isinstance(pid, int):
+        try:
+            pid = int(pid)
+        except (ValueError, TypeError):
+            error_print(f"Invalid PID value: {pid!r}, must be an integer")
+            return False
+
+    if pid <= 0:
+        debug_print(f"Invalid PID: {pid} (must be > 0)")
+        return False
+
+    # First try with psutil if available (most reliable cross-platform method)
+    try:
+        import psutil
+        trace_print(f"Using psutil to check process {pid}")
+        try:
+            process = psutil.Process(pid)
+            # Check if zombie
+            if process.status() == psutil.STATUS_ZOMBIE:
+                debug_print(f"Process {pid} is a zombie process")
+                return False
+            # Process exists and is not a zombie
+            trace_print(f"Process {pid} is running (verified with psutil)")
+            return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            debug_print(f"Process {pid} is not running (per psutil)")
+            return False
+    except ImportError:
+        trace_print("psutil not available, falling back to platform-specific methods")
+
+    # Platform-specific methods as fallback
+    try:
+        # Check if process exists using platform-specific methods
+        if sys.platform == "win32":
+            # Windows-specific check using tasklist
+            trace_print(f"Using tasklist to check process {pid} (Windows)")
+            try:
+                CREATE_NO_WINDOW = 0x08000000
+                output = subprocess.check_output(
+                    f'tasklist /FI "PID eq {pid}" /NH /FO CSV',
+                    creationflags=CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                    shell=True,
+                    text=True,
+                    stderr=subprocess.PIPE
+                )
+                result = str(pid) in output
+                trace_print(f"Tasklist result for PID {pid}: {'running' if result else 'not running'}")
+                return result
+            except subprocess.CalledProcessError as e:
+                error_print(f"Error running tasklist command: {e}")
+                # Try Windows WMI as a backup method
+                try:
+                    wmi_output = subprocess.check_output(
+                        f'wmic process where ProcessId={pid} get ProcessId /format:list',
+                        creationflags=CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                        shell=True,
+                        text=True,
+                        stderr=subprocess.PIPE
+                    )
+                    result = f"ProcessId={pid}" in wmi_output
+                    trace_print(f"WMI result for PID {pid}: {'running' if result else 'not running'}")
+                    return result
+                except subprocess.CalledProcessError as e2:
+                    print(f"[DEBUG] WMI command error type: {type(e2).__name__}")
+                    print(f"[DEBUG] WMI command error details: {e2}")
+                    error_print(f"Error running WMI command: {e2}")
+                    return False
+        else:
+            # Unix-based systems
+            trace_print(f"Using os.kill(0) to check process {pid} (Unix)")
+            try:
+                # The signal 0 doesn't actually send a signal, but performs error checking
+                os.kill(pid, 0)
+
+                # On Linux, check if it's a zombie process using /proc
+                if sys.platform.startswith('linux'):
+                    trace_print(f"Checking /proc/{pid}/status for zombie state")
+                    try:
+                        with open(f'/proc/{pid}/status', 'r') as f:
+                            status = f.read()
+                            is_zombie = 'zombie' in status.lower()
+                            if is_zombie:
+                                debug_print(f"Process {pid} is a zombie process")
+                            return not is_zombie
+                    except (FileNotFoundError, ProcessLookupError, PermissionError) as e:
+                        print(f"[DEBUG] Proc status read error type: {type(e).__name__}")
+                        print(f"[DEBUG] Proc status read error details: {e}")
+                        debug_print(f"Error reading proc status for {pid}: {e}")
+                        # Process doesn't exist or we don't have permission
+                        return False
+
+                trace_print(f"Process {pid} is running")
+                return True
+            except (ProcessLookupError, PermissionError) as e:
+                debug_print(f"Process {pid} is not running: {e}")
+                return False
+
+    except Exception as e:
+        error_print(f"Error checking if process {pid} is running: {e}")
+        if DEBUG_MODE:
+            error_print(traceback.format_exc())
+        # Log the error for diagnostics
+        log_event("PROCESS_CHECK_ERROR", {
+            "pid": pid,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        # If we couldn't determine reliably, assume it's not running for safety
+        return False
+
+class FileLock:
+    """
+    Cross-platform file locking using atomic file operations.
+
+    This implementation avoids using fcntl, making it compatible with both
+    Unix-like systems and Windows.
+    """
+    def __init__(self, lock_file: Union[str, Path]):
+        """
+        Initialize a file lock.
+
+        Args:
+            lock_file: Path to the lock file
+        """
+        try:
+            self.lock_file = Path(lock_file)
+            self.lock_acquired = False
+            # Create a unique id for this lock instance
+            self.unique_id = str(uuid.uuid4())
+            self.lock_dir = self.lock_file.parent
+
+            trace_print(f"Initializing FileLock for: {self.lock_file} (unique_id: {self.unique_id})")
+
+            # Ensure the directory exists
+            try:
+                self.lock_dir.mkdir(parents=True, exist_ok=True)
+                trace_print(f"Lock directory ensured: {self.lock_dir}")
+            except Exception as e:
+                print(f"[DEBUG] Lock directory creation error type: {type(e).__name__}")
+                print(f"[DEBUG] Lock directory creation error details: {e}")
+                error_print(f"Failed to create lock directory {self.lock_dir}: {e}")
+                # Try to use temp directory as fallback
+                self.lock_dir = Path(tempfile.gettempdir())
+                self.lock_file = self.lock_dir / self.lock_file.name
+                error_print(f"Using fallback lock location: {self.lock_file}")
+                try:
+                    self.lock_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as e2:
+                    print(f"[DEBUG] Fallback lock directory error type: {type(e2).__name__}")
+                    print(f"[DEBUG] Fallback lock directory error details: {e2}")
+                    error_print(f"Failed to access fallback lock directory: {e2}")
+                    raise
+
+            # Temp file for atomic operations - ensure unique name for concurrent processes
+            self.temp_file = self.lock_dir / f".tmp_{self.unique_id}_{self.lock_file.name}"
+            trace_print(f"Temporary file for lock operations: {self.temp_file}")
+        except Exception as e:
+            print(f"[DEBUG] FileLock initialization error type: {type(e).__name__}")
+            print(f"[DEBUG] FileLock initialization error details: {e}")
+            import traceback
+            print(f"[DEBUG] FileLock initialization traceback: {traceback.format_exc()}")
+            error_print(f"Error initializing FileLock: {e}")
+            # Re-raise so caller is aware of the issue
+            raise
+
+    def acquire(self, timeout: float = 0, poll_interval: float = 0.1) -> bool:
+        """
+        Acquire the lock with optional timeout.
+
+        Args:
+            timeout: Maximum time to wait for the lock (0 = no wait)
+            poll_interval: How often to check if lock is available
+
+        Returns:
+            bool: True if lock was acquired, False otherwise
+        """
+        trace_print(f"Attempting to acquire lock: {self.lock_file} (timeout: {timeout}s)")
+
+        # Validate parameters
+        if timeout < 0:
+            error_print(f"Invalid timeout value: {timeout}, must be >= 0")
+            timeout = 0
+
+        if poll_interval <= 0:
+            error_print(f"Invalid poll_interval: {poll_interval}, must be > 0")
+            poll_interval = 0.1
+
+        if self.lock_acquired:
+            trace_print(f"Lock already acquired: {self.lock_file}")
+            return True
+
+        # Check if lock is held by a running process
+        if self.is_held_by_running_process():
+            debug_print(f"Lock {self.lock_file} is held by a running process, cannot acquire")
+            return False
+
+        # Calculate end time if timeout is specified
+        end_time = time.time() + timeout if timeout > 0 else None
+        start_time = time.time()
+        attempt_count = 0
+
+        while True:
+            attempt_count += 1
+            trace_print(f"Lock acquisition attempt #{attempt_count} for {self.lock_file}")
+
+            try:
+                # Check if the lock file already exists
+                if self.lock_file.exists():
+                    trace_print(f"Lock file exists: {self.lock_file}")
+
+                    # Attempt to read the lock to get more information
+                    try:
+                        with open(self.lock_file, 'r') as f:
+                            lock_data = json.load(f)
+                            trace_print(f"Lock data: {lock_data}")
+                            # Check for stale lock by timestamp if available
+                            if "timestamp" in lock_data:
+                                try:
+                                    lock_time = datetime.datetime.fromisoformat(lock_data["timestamp"])
+                                    now = datetime.datetime.now()
+                                    age = (now - lock_time).total_seconds()
+                                    if age > 3600:  # 1 hour
+                                        debug_print(f"Found stale lock (age: {age}s): {self.lock_file}")
+                                        try:
+                                            # Try to remove stale lock
+                                            self.lock_file.unlink()
+                                            debug_print(f"Removed stale lock: {self.lock_file}")
+                                            # Continue to re-attempt acquisition
+                                            continue
+                                        except PermissionError as perm_e:
+                                            # Lock file is being held by another process
+                                            # Check if the process holding it is still running
+                                            if "pid" in lock_data:
+                                                try:
+                                                    lock_pid = int(lock_data["pid"])
+                                                    if not is_process_running(lock_pid):
+                                                        debug_print(f"Stale lock held by dead process {lock_pid}, but cannot remove due to permission error")
+                                                        # Force break the loop to prevent infinite retries
+                                                        return False
+                                                    else:
+                                                        debug_print(f"Lock is held by running process {lock_pid}, cannot acquire")
+                                                        return False
+                                                except (ValueError, TypeError):
+                                                    debug_print(f"Invalid PID in lock file, cannot determine process status")
+                                                    return False
+                                            else:
+                                                debug_print(f"No PID in lock file, cannot determine if process is running")
+                                                return False
+                                        except Exception as e:
+                                            print(f"[DEBUG] Stale lock removal error type: {type(e).__name__}")
+                                            print(f"[DEBUG] Stale lock removal error details: {e}")
+                                            trace_print(f"Failed to remove stale lock: {e}")
+                                            # Prevent infinite retry loop
+                                            return False
+                                except (ValueError, TypeError):
+                                    debug_print(f"Invalid timestamp in lock: {lock_data.get('timestamp')}")
+                    except Exception as e:
+                        print(f"[DEBUG] Lock file read error type: {type(e).__name__}")
+                        print(f"[DEBUG] Lock file read error details: {e}")
+                        trace_print(f"Error reading lock file: {e}")
+
+                # Try to create the lock file atomically
+                trace_print(f"Creating temporary lock file: {self.temp_file}")
+
+                with open(self.temp_file, 'w') as f:
+                    # Write our unique ID and process info for debugging
+                    lock_data = {
+                        "pid": os.getpid(),
+                        "unique_id": self.unique_id,
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "hostname": socket.gethostname(),
+                        "process_name": os.environ.get("PROCESS_NAME", "unknown"),
+                        "attempted_at": datetime.datetime.now().isoformat()
+                    }
+                    json.dump(lock_data, f, indent=2)
+                    f.flush()
+
+                # Try to atomically link/rename the temp file to the lock file
+                try:
+                    # Atomic operation - will fail if lock file already exists
+                    trace_print(f"Attempting atomic rename: {self.temp_file} -> {self.lock_file}")
+                    os.rename(self.temp_file, self.lock_file)
+                    self.lock_acquired = True
+                    acquisition_time = time.time() - start_time
+                    debug_print(f"Lock acquired: {self.lock_file} (attempt #{attempt_count}, took {acquisition_time:.3f}s)")
+                    # Log successful acquisition
+                    log_event("LOCK_ACQUIRED", {
+                        "lock_file": str(self.lock_file),
+                        "unique_id": self.unique_id,
+                        "attempt_count": attempt_count,
+                        "acquisition_time": acquisition_time
+                    })
+                    return True
+                except OSError as e:
+                    trace_print(f"Rename failed (lock exists): {e}")
+                    # Lock file already exists
+                    pass
+
+                # Check if we've timed out
+                if end_time is not None and time.time() >= end_time:
+                    elapsed = time.time() - start_time
+                    debug_print(f"Lock acquisition timed out after {elapsed:.3f}s ({attempt_count} attempts): {self.lock_file}")
+                    # Log timeout
+                    log_event("LOCK_TIMEOUT", {
+                        "lock_file": str(self.lock_file),
+                        "unique_id": self.unique_id,
+                        "attempt_count": attempt_count,
+                        "elapsed_time": elapsed,
+                        "timeout": timeout
+                    })
+                    return False
+
+                # Wait before trying again
+                if timeout > 0:
+                    trace_print(f"Waiting {poll_interval}s before next attempt")
+                    time.sleep(poll_interval)
+                else:
+                    # No timeout specified, so don't retry
+                    debug_print(f"Lock is held by another process: {self.lock_file}")
+                    # Log failed acquisition
+                    log_event("LOCK_DENIED", {
+                        "lock_file": str(self.lock_file),
+                        "unique_id": self.unique_id,
+                        "attempt_count": 1
+                    })
+                    return False
+
+            except Exception as e:
+                error_print(f"Error acquiring lock {self.lock_file}: {e}")
+                if DEBUG_MODE:
+                    error_print(traceback.format_exc())
+                # Log error
+                log_event("LOCK_ACQUISITION_ERROR", {
+                    "lock_file": str(self.lock_file),
+                    "unique_id": self.unique_id,
+                    "error": str(e),
+                    "attempt_count": attempt_count
+                })
+                return False
+            finally:
+                # Clean up temp file if it still exists
+                if self.temp_file.exists():
+                    try:
+                        trace_print(f"Cleaning up temporary file: {self.temp_file}")
+                        self.temp_file.unlink()
+                    except Exception as e:
+                        print(f"[DEBUG] Temp file cleanup error type: {type(e).__name__}")
+                        print(f"[DEBUG] Temp file cleanup error details: {e}")
+                        trace_print(f"Error cleaning temporary file: {e}")
+
+    def release(self) -> bool:
+        """
+        Release the lock.
+
+        Returns:
+            bool: True if lock was released successfully, False otherwise
+        """
+        trace_print(f"Attempting to release lock: {self.lock_file}")
+
+        if not self.lock_acquired:
+            trace_print(f"Lock not acquired, nothing to release: {self.lock_file}")
+            return True
+
+        # Verify we own the lock before releasing
+        owner_verified = False
+        try:
+            if self.lock_file.exists():
+                with open(self.lock_file, 'r') as f:
+                    lock_data = json.load(f)
+                    if lock_data.get("unique_id") == self.unique_id:
+                        trace_print(f"Verified we own the lock (unique_id: {self.unique_id})")
+                        owner_verified = True
+                    else:
+                        error_print(f"Attempted to release lock owned by another process! " +
+                                  f"Our ID: {self.unique_id}, Lock ID: {lock_data.get('unique_id')}")
+                        return False
+            else:
+                debug_print(f"Lock file doesn't exist, assuming already released: {self.lock_file}")
+                self.lock_acquired = False
+                return True
+        except Exception as e:
+            # If we can't verify, assume we own it for safety
+            print(f"[DEBUG] Lock ownership verification error type: {type(e).__name__}")
+            print(f"[DEBUG] Lock ownership verification error details: {e}")
+            trace_print(f"Error verifying lock ownership, assuming we own it: {e}")
+            owner_verified = True
+
+        if not owner_verified:
+            return False
+
+        try:
+            # Remove the lock file
+            if self.lock_file.exists():
+                self.lock_file.unlink()
+                debug_print(f"Lock released: {self.lock_file}")
+                # Log release
+                log_event("LOCK_RELEASED", {
+                    "lock_file": str(self.lock_file),
+                    "unique_id": self.unique_id
+                })
+            else:
+                debug_print(f"Lock file already removed: {self.lock_file}")
+
+            self.lock_acquired = False
+            return True
+        except Exception as e:
+            error_print(f"Error releasing lock {self.lock_file}: {e}")
+            if DEBUG_MODE:
+                error_print(traceback.format_exc())
+            # Log error
+            log_event("LOCK_RELEASE_ERROR", {
+                "lock_file": str(self.lock_file),
+                "unique_id": self.unique_id,
+                "error": str(e)
+            })
+            return False
+
+    def is_held_by_running_process(self) -> bool:
+        """
+        Check if the lock is held by a currently running process.
+        
+        Returns:
+            bool: True if lock is held by a running process, False otherwise
+        """
+        if not self.lock_file.exists():
+            return False
+            
+        try:
+            with open(self.lock_file, 'r') as f:
+                lock_data = json.load(f)
+                
+            if "pid" in lock_data:
+                try:
+                    pid = int(lock_data["pid"])
+                    return is_process_running(pid)
+                except (ValueError, TypeError):
+                    return False
+                    
+        except (json.JSONDecodeError, PermissionError, FileNotFoundError):
+            return False
+            
+        return False
+
+    def is_stale(self, max_age_seconds: int = 3600) -> bool:
+        """
+        Check if the lock file is stale (old or orphaned).
+
+        Args:
+            max_age_seconds: Maximum age in seconds before considering lock stale
+
+        Returns:
+            bool: True if lock is stale, False otherwise
+        """
+        trace_print(f"Checking if lock is stale: {self.lock_file}")
+
+        if not self.lock_file.exists():
+            trace_print(f"Lock file doesn't exist: {self.lock_file}")
+            return False
+
+        try:
+            # Read the lock file
+            with open(self.lock_file, 'r') as f:
+                try:
+                    lock_data = json.load(f)
+                    trace_print(f"Lock data: {lock_data}")
+                except json.JSONDecodeError as e:
+                    debug_print(f"Invalid JSON in lock file: {e}")
+                    # If we can't decode, assume it's stale
+                    return True
+
+            # Check timestamp
+            if "timestamp" in lock_data:
+                try:
+                    lock_time = datetime.datetime.fromisoformat(lock_data["timestamp"])
+                    now = datetime.datetime.now()
+                    age = (now - lock_time).total_seconds()
+                    trace_print(f"Lock age: {age}s, max age: {max_age_seconds}s")
+                    if age > max_age_seconds:
+                        debug_print(f"Lock is stale by age ({age}s > {max_age_seconds}s): {self.lock_file}")
+                        return True
+                except (ValueError, TypeError) as e:
+                    debug_print(f"Invalid timestamp in lock file: {e}")
+                    # If timestamp is invalid, check PID
+
+            # Check PID if available
+            if "pid" in lock_data:
+                try:
+                    pid = int(lock_data["pid"])
+                    if not is_process_running(pid):
+                        debug_print(f"Process {pid} no longer running, lock is stale: {self.lock_file}")
+                        return True
+                    else:
+                        trace_print(f"Process {pid} is running, lock is still valid")
+                except (ValueError, TypeError) as e:
+                    debug_print(f"Invalid PID in lock file: {e}")
+                    # If PID is invalid, assume it's stale
+                    return True
+
+            # If we got here, the lock seems valid
+            return False
+        except Exception as e:
+            error_print(f"Error checking if lock is stale: {e}")
+            # If we can't check, assume it's not stale for safety
+            return False
+
+    def __enter__(self):
+        """Context manager enter method."""
+        trace_print(f"Entering FileLock context: {self.lock_file}")
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit method."""
+        trace_print(f"Exiting FileLock context: {self.lock_file}")
+        self.release()
+
+class PidFile:
+    """
+    Standardized PID file management with schema validation.
+    
+    This class handles reading and writing PID files in a standardized
+    JSON format, with support for backward compatibility with legacy
+    plain-text PID files.
+    """
+    def __init__(self, pid_file: Union[str, Path]):
+        """
+        Initialize a PID file handler.
+        
+        Args:
+            pid_file: Path to the PID file
+        """
+        self.pid_file = Path(pid_file)
+        self.lock = FileLock(self.pid_file.with_suffix(self.pid_file.suffix + ".lock"))
+    
+    def read(self) -> Optional[Dict[str, Any]]:
+        """
+        Read the PID file, supporting both JSON and legacy formats.
+        
+        Returns:
+            dict: PID file contents, or None if file doesn't exist or is invalid
+        """
+        if not self.pid_file.exists():
+            debug_print(f"PID file does not exist: {self.pid_file}")
+            return None
+            
+        try:
+            # Acquire a shared lock for reading
+            with self.lock:
+                # Read the file content
+                content = self.pid_file.read_text().strip()
+                
+                # Empty file check
+                if not content:
+                    debug_print(f"PID file is empty: {self.pid_file}")
+                    return None
+                
+                # Try to parse as JSON first (modern format)
+                try:
+                    data = json.loads(content)
+                    
+                    # Validate against schema - ensure it has pid at minimum
+                    if isinstance(data, dict) and "pid" in data:
+                        # Ensure PID is an integer
+                        try:
+                            data["pid"] = int(data["pid"])
+                            debug_print(f"Successfully read JSON PID file {self.pid_file} with PID {data['pid']}")
+                            return data
+                        except (ValueError, TypeError):
+                            debug_print(f"Invalid PID value in {self.pid_file}: {data['pid']}")
+                            return None
+                    else:
+                        debug_print(f"JSON PID file missing 'pid' field: {self.pid_file}")
+                        return None
+                        
+                except json.JSONDecodeError:
+                    # Not JSON, try to parse as plain integer (legacy format)
+                    try:
+                        pid = int(content)
+                        # Create a compatible dictionary for legacy PID
+                        data = {
+                            "pid": pid,
+                            "timestamp": datetime.datetime.now().isoformat(),
+                            "legacy_format": True,
+                            "detected_at": datetime.datetime.now().isoformat()
+                        }
+                        debug_print(f"Successfully read legacy PID file {self.pid_file} with PID {pid}")
+                        return data
+                    except ValueError:
+                        debug_print(f"PID file contains invalid data (not JSON or integer): {self.pid_file}")
+                        return None
+        except Exception as e:
+            debug_print(f"Error reading PID file {self.pid_file}: {e}")
+            return None
+    
+    def write(self, pid: int, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Write a PID file in standardized JSON format.
+        
+        Args:
+            pid: Process ID to write
+            metadata: Optional metadata to include in the PID file
+            
+        Returns:
+            bool: True if write was successful, False otherwise
+        """
+        # Ensure pid is an integer
+        try:
+            pid = int(pid)
+            if pid <= 0:
+                raise ValueError(f"Invalid PID: {pid}")
+        except (ValueError, TypeError):
+            debug_print(f"Invalid PID value: {pid}")
+            return False
+            
+        # Create the data structure
+        data = {
+            "pid": pid,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "hostname": socket.gethostname()
+        }
+        
+        # Add optional metadata
+        if metadata:
+            data.update(metadata)
+            
+        try:
+            # Ensure parent directory exists
+            self.pid_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Use atomic write with temp file
+            with tempfile.NamedTemporaryFile(
+                mode='w', 
+                dir=self.pid_file.parent, 
+                delete=False
+            ) as tmp:
+                json.dump(data, tmp, indent=2)
+                tmp_path = tmp.name
+            
+            # Acquire an exclusive lock for writing
+            with self.lock:
+                # Atomic rename
+                shutil.move(tmp_path, self.pid_file)
+                
+            debug_print(f"Successfully wrote PID file {self.pid_file} with PID {pid}")
+            return True
+            
+        except Exception as e:
+            debug_print(f"Error writing PID file {self.pid_file}: {e}")
+            # Clean up temp file if it exists
+            try:
+                if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception as tmp_cleanup_err:
+                print(f"[DEBUG] Temp file removal error type: {type(tmp_cleanup_err).__name__}", file=sys.stderr)
+                print(f"[DEBUG] Temp file removal error details: {tmp_cleanup_err}", file=sys.stderr)
+                pass  # Non-critical cleanup failure
+            return False
+    
+    def remove(self) -> bool:
+        """
+        Remove the PID file.
+        
+        Returns:
+            bool: True if removal was successful, False otherwise
+        """
+        try:
+            # Acquire an exclusive lock before removing
+            with self.lock:
+                if self.pid_file.exists():
+                    self.pid_file.unlink()
+                    debug_print(f"Removed PID file {self.pid_file}")
+                return True
+        except Exception as e:
+            debug_print(f"Error removing PID file {self.pid_file}: {e}")
+            return False
+    
+    def is_stale(self) -> bool:
+        """
+        Check if the PID file refers to a stale (non-existent) process.
+        
+        Returns:
+            bool: True if the PID file is stale, False if it refers to a running process
+        """
+        data = self.read()
+        if not data:
+            # No PID file or invalid format
+            return True
+            
+        # Check if process is running
+        pid = data.get("pid")
+        if not pid or not is_process_running(pid):
+            debug_print(f"PID file {self.pid_file} refers to a non-existent process (PID: {pid})")
+            return True
+            
+        return False
+    
+    def cleanup_if_stale(self) -> bool:
+        """
+        Remove the PID file if it refers to a stale process.
+        
+        Returns:
+            bool: True if the PID file was removed, False otherwise
+        """
+        if self.is_stale():
+            return self.remove()
+        return False
+
+class PortManager:
+    """
+    Port availability checking and conflict resolution.
+    
+    This class provides methods for checking if a port is in use,
+    finding available ports, and resolving port conflicts.
+    """
+    def __init__(self, base_port: int = 8000, max_attempts: int = 10):
+        """
+        Initialize a port manager.
+        
+        Args:
+            base_port: Starting port number for finding available ports
+            max_attempts: Maximum number of port numbers to try
+        """
+        self.base_port = base_port
+        self.max_attempts = max_attempts
+    
+    def is_port_in_use(self, port: int) -> bool:
+        """
+        Check if a port is in use.
+        
+        Args:
+            port: Port number to check
+            
+        Returns:
+            bool: True if port is in use, False otherwise
+        """
+        try:
+            # Most reliable cross-platform way to check if a port is in use
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1.0)
+                result = s.connect_ex(('localhost', port))
+                in_use = result == 0
+                
+                # On Windows, certain error codes can also indicate the port is in use
+                if sys.platform == 'win32' and result in (10048, 10049):
+                    in_use = True
+                    
+                debug_print(f"Port {port} {'is' if in_use else 'is not'} in use (code: {result})")
+                return in_use
+        except Exception as e:
+            debug_print(f"Error checking port {port}: {e}")
+            # If we can't check reliably, assume it might be in use to be safe
+            return True
+    
+    def find_available_port(self, start_port: Optional[int] = None) -> int:
+        """
+        Find an available port starting from start_port.
+        
+        Args:
+            start_port: Port number to start checking from (defaults to base_port)
+            
+        Returns:
+            int: Available port number, or -1 if none found
+        """
+        port = start_port if start_port is not None else self.base_port
+        attempts = 0
+        
+        while attempts < self.max_attempts:
+            if not self.is_port_in_use(port):
+                debug_print(f"Found available port: {port}")
+                return port
+                
+            port += 1
+            attempts += 1
+            
+        debug_print(f"Could not find available port after {self.max_attempts} attempts")
+        return -1
+    
+    def resolve_port_conflict(self, requested_port: int) -> int:
+        """
+        Resolve a port conflict by finding an available port.
+        
+        Args:
+            requested_port: Preferred port number
+            
+        Returns:
+            int: Available port number (may be the requested port if available),
+                 or -1 if no port could be found
+        """
+        # First check if the requested port is available
+        if not self.is_port_in_use(requested_port):
+            return requested_port
+            
+        # Find an alternative port
+        alternative_port = self.find_available_port(requested_port + 1)
+        if alternative_port != -1:
+            debug_print(f"Port conflict resolved: {requested_port} -> {alternative_port}")
+            return alternative_port
+            
+        # Could not find an available port
+        debug_print(f"Could not resolve port conflict for port {requested_port}")
+        return -1
+
+class ProcessVerifier:
+    """
+    Process existence and health verification.
+    
+    This class provides methods for verifying that a process exists
+    and is healthy, with support for different verification methods.
+    """
+    def __init__(self, pid: int, process_type: str, metadata: Optional[Dict[str, Any]] = None):
+        """
+        Initialize a process verifier.
+        
+        Args:
+            pid: Process ID to verify
+            process_type: Type of process (e.g., 'fastapi', 'gradio')
+            metadata: Optional metadata about the process
+        """
+        self.pid = pid
+        self.process_type = process_type
+        self.metadata = metadata or {}
+        
+    def is_running(self) -> bool:
+        """
+        Check if the process is running.
+        
+        Returns:
+            bool: True if process is running, False otherwise
+        """
+        return is_process_running(self.pid)
+    
+    def verify_port(self, port: int) -> bool:
+        """
+        Verify that the port is in use.
+        
+        Args:
+            port: Port number to check
+            
+        Returns:
+            bool: True if port is in use, False otherwise
+        """
+        port_manager = PortManager()
+        return port_manager.is_port_in_use(port)
+    
+    def verify_http_endpoint(self, url: str, timeout: float = 5.0) -> Tuple[bool, Optional[str]]:
+        """
+        Verify that an HTTP endpoint is responding.
+        
+        Args:
+            url: URL to check
+            timeout: Timeout in seconds
+            
+        Returns:
+            tuple: (success, response_text)
+        """
+        try:
+            import requests
+            response = requests.get(url, timeout=timeout)
+            return response.status_code < 400, response.text
+        except Exception as e:
+            debug_print(f"Error verifying HTTP endpoint {url}: {e}")
+            return False, None
+    
+    def get_command_line(self) -> Optional[str]:
+        """
+        Get the command line of the process.
+        
+        Returns:
+            str: Command line, or None if it couldn't be determined
+        """
+        try:
+            if sys.platform == "win32":
+                # Windows-specific check using wmic
+                CREATE_NO_WINDOW = 0x08000000
+                output = subprocess.check_output(
+                    f'wmic process where ProcessId={self.pid} get CommandLine /format:list',
+                    creationflags=CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                    shell=True,
+                    text=True
+                )
+                for line in output.splitlines():
+                    if line.startswith("CommandLine="):
+                        return line[12:].strip()
+            else:
+                # Unix-based systems
+                try:
+                    with open(f'/proc/{self.pid}/cmdline', 'rb') as f:
+                        cmdline = f.read().decode('utf-8', errors='replace').replace('\0', ' ').strip()
+                        return cmdline
+                except (FileNotFoundError, ProcessLookupError) as cmdline_err:
+                    print(f"[DEBUG] Cmdline read error type: {type(cmdline_err).__name__}", file=sys.stderr)
+                    print(f"[DEBUG] Cmdline read error details: {cmdline_err}", file=sys.stderr)
+                    pass  # Process may have ended, this is expected
+        except Exception as e:
+            debug_print(f"Error getting command line for process {self.pid}: {e}")
+        
+        return None
+    
+    def get_status(self) -> Dict[str, Any]:
+        """
+        Get comprehensive status information about the process.
+        
+        Returns:
+            dict: Status information
+        """
+        running = self.is_running()
+        command = self.get_command_line()
+        port = self.metadata.get("port")
+        port_active = self.verify_port(port) if port else None
+        
+        status = {
+            "pid": self.pid,
+            "running": running,
+            "process_type": self.process_type,
+            "command": command,
+            "metadata": self.metadata,
+            "port": port,
+            "port_active": port_active
+        }
+        
+        return status
+
+def get_python_executable() -> str:
+    """
+    Get the appropriate Python executable path based on the current environment.
+    
+    Returns:
+        str: Path to the Python executable
+    """
+    # Start with the current executable
+    python_exe = sys.executable
+    
+    # Check if we're in a virtual environment
+    in_venv = hasattr(sys, 'real_prefix') or (
+        hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix
+    )
+    
+    # WSL-specific handling
+    if is_wsl():
+        # In WSL, prefer the WSL Python path
+        venv_path = os.environ.get('VIRTUAL_ENV')
+        if venv_path:
+            # Virtual environment in WSL
+            potential_path = os.path.join(venv_path, 'bin', 'python')
+            if os.path.exists(potential_path) and os.access(potential_path, os.X_OK):
+                python_exe = potential_path
+        else:
+            # System Python in WSL
+            for potential_path in ['/usr/bin/python3', '/usr/bin/python']:
+                if os.path.exists(potential_path) and os.access(potential_path, os.X_OK):
+                    python_exe = potential_path
+                    break
+    
+    # For Windows or other platforms, use the sys.executable which should point
+    # to the correct interpreter, including virtual environments
+    
+    debug_print(f"Selected Python executable: {python_exe}")
+    return python_exe
+
+def check_process_health(pidfiles: Optional[List[Path]] = None) -> Dict[str, Dict[str, Any]]:
+    """
+    Check the health of multiple processes based on their PID files.
+    
+    Args:
+        pidfiles: List of PID files to check (defaults to standard ones)
+        
+    Returns:
+        dict: Health information for each process
+    """
+    result = {}
+    
+    # Use standard PID files if none provided
+    if pidfiles is None:
+        pidfiles = [
+            Path('./inference_process.pid'),
+            Path('./data_collection_ui.pid'),
+            Path('./inference_ui.pid')
+        ]
+    
+    # Check each PID file
+    for pidfile_path in pidfiles:
+        try:
+            # Skip if the file doesn't exist
+            if not pidfile_path.exists():
+                continue
+                
+            # Read the PID file
+            pidfile = PidFile(pidfile_path)
+            data = pidfile.read()
+            
+            if not data:
+                # Invalid or empty PID file
+                continue
+                
+            # Get the process ID
+            pid = data.get("pid")
+            if not pid:
+                continue
+                
+            # Determine process type from file name or metadata
+            process_type = data.get("process_type", pidfile_path.stem)
+            
+            # Create a verifier and get status
+            verifier = ProcessVerifier(pid, process_type, data)
+            status_info = verifier.get_status()
+            
+            # Add to result
+            result[process_type] = status_info
+            
+        except Exception as e:
+            debug_print(f"Error checking process health for {pidfile_path}: {e}")
+    
+    return result
+
+def cleanup_stale_processes(pidfiles: Optional[List[Path]] = None) -> Dict[str, Any]:
+    """
+    Clean up stale processes by removing their PID files.
+    
+    Args:
+        pidfiles: List of PID files to check (defaults to standard ones)
+        
+    Returns:
+        dict: Information about the cleanup
+    """
+    result = {
+        "stale_processes": 0,
+        "cleaned_pid_files": 0,
+        "errors": []
+    }
+    
+    # Use standard PID files if none provided
+    if pidfiles is None:
+        pidfiles = [
+            Path('./inference_process.pid'),
+            Path('./data_collection_ui.pid'),
+            Path('./inference_ui.pid')
+        ]
+    
+    debug_print(f"Checking {len(pidfiles)} PID files for stale processes")
+    
+    # Check each PID file
+    for pidfile_path in pidfiles:
+        try:
+            # Skip if the file doesn't exist
+            if not pidfile_path.exists():
+                debug_print(f"PID file {pidfile_path} does not exist, skipping")
+                continue
+                
+            # Check if the PID file is stale
+            pidfile = PidFile(pidfile_path)
+            if pidfile.is_stale():
+                # Remove the PID file
+                if pidfile.remove():
+                    result["stale_processes"] += 1
+                    result["cleaned_pid_files"] += 1
+                    debug_print(f"Removed stale PID file {pidfile_path}")
+                else:
+                    error_msg = f"Failed to remove stale PID file {pidfile_path}"
+                    debug_print(error_msg)
+                    result["errors"].append(error_msg)
+            
+        except Exception as e:
+            error_msg = f"Error cleaning up PID file {pidfile_path}: {e}"
+            debug_print(error_msg)
+            result["errors"].append(error_msg)
+    
+    # Check for lock files in the process_locks directory
+    locks_dir = Path('./process_locks')
+    if locks_dir.exists() and locks_dir.is_dir():
+        try:
+            debug_print(f"Checking process lock directory: {locks_dir}")
+            lock_files = list(locks_dir.glob("*.lock"))
+            debug_print(f"Found {len(lock_files)} lock files to check")
+            
+            for lock_file in lock_files:
+                try:
+                    # First, try to read the lock file to check if process is still running
+                    lock_data = None
+                    try:
+                        with open(lock_file, 'r') as f:
+                            lock_data = json.load(f)
+                    except (json.JSONDecodeError, PermissionError, FileNotFoundError):
+                        # If we can't read the lock file, skip it
+                        debug_print(f"Cannot read lock file {lock_file}, skipping cleanup")
+                        continue
+                    
+                    # Check if the process is still running
+                    if lock_data and "pid" in lock_data:
+                        try:
+                            lock_pid = int(lock_data["pid"])
+                            if is_process_running(lock_pid):
+                                # Process is still running, don't remove the lock
+                                debug_print(f"Lock file {lock_file} belongs to running process {lock_pid}, skipping")
+                                continue
+                            else:
+                                debug_print(f"Lock file {lock_file} belongs to dead process {lock_pid}, attempting cleanup")
+                        except (ValueError, TypeError):
+                            debug_print(f"Invalid PID in lock file {lock_file}, attempting cleanup")
+                    
+                    # Try to acquire the lock - if successful, it was stale
+                    file_lock = FileLock(lock_file)
+                    if file_lock.acquire(timeout=0):
+                        # Successfully acquired the lock, which means it was stale
+                        file_lock.release()
+                        # Remove the lock file
+                        try:
+                            lock_file.unlink()
+                            result["stale_processes"] += 1
+                            debug_print(f"Removed stale lock file {lock_file}")
+                        except PermissionError as perm_e:
+                            # Lock file is still being held by another process, skip it
+                            debug_print(f"Cannot remove lock file {lock_file}: still in use by another process")
+                        except Exception as e:
+                            error_msg = f"Failed to remove stale lock file {lock_file}: {e}"
+                            debug_print(error_msg)
+                            result["errors"].append(error_msg)
+                    else:
+                        debug_print(f"Could not acquire lock {lock_file}, it's still in use")
+                except Exception as e:
+                    # Only log as error if it's not a permission error
+                    if isinstance(e, PermissionError):
+                        debug_print(f"Lock file {lock_file} is in use by another process, skipping")
+                    else:
+                        error_msg = f"Error checking lock file {lock_file}: {e}"
+                        debug_print(error_msg)
+                        result["errors"].append(error_msg)
+                    
+        except Exception as e:
+            error_msg = f"Error checking process lock directory: {e}"
+            debug_print(error_msg)
+            result["errors"].append(error_msg)
+    
+    return result
+
+def acquire_process_lock(port: int, process_type: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Acquire a process lock for the given port and process type.
+    
+    Args:
+        port: Port number to lock
+        process_type: Type of process
+        metadata: Optional metadata to include in the lock file
+        
+    Returns:
+        bool: True if lock was acquired, False otherwise
+    """
+    # Create lock file path
+    locks_dir = Path('./process_locks')
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = locks_dir / f"{process_type}_{port}.lock"
+    
+    debug_print(f"Attempting to acquire lock for {process_type} on port {port}...")
+    
+    # Log the attempt
+    log_event_details = {
+        "process_type": process_type,
+        "port": port,
+        "pid": os.getpid()
+    }
+    
+    try:
+        # First check if port is in use
+        port_manager = PortManager()
+        if port_manager.is_port_in_use(port):
+            debug_print(f"Port {port} is already in use")
+            log_event_details["port_in_use"] = True
+            log_event("LOCK_DENIED", log_event_details)
+            return False
+            
+        # Set up the metadata
+        meta = {
+            "process_type": process_type,
+            "port": port,
+            "command": " ".join(sys.argv),
+            "hostname": socket.gethostname(),
+            "python_executable": sys.executable
+        }
+        
+        if metadata:
+            meta.update(metadata)
+            
+        # Create the lock file
+        file_lock = FileLock(lock_file)
+        if not file_lock.acquire(timeout=2.0):  # Allow a short timeout for busy systems
+            debug_print(f"Failed to acquire lock for {process_type} on port {port}")
+            log_event_details["lock_acquired"] = False
+            log_event("LOCK_DENIED", log_event_details)
+            return False
+            
+        # Successfully acquired the lock - write the PID file
+        pid_file = PidFile(lock_file)
+        if not pid_file.write(os.getpid(), meta):
+            # Failed to write PID file - release the lock
+            file_lock.release()
+            debug_print(f"Failed to write PID file for {process_type} on port {port}")
+            log_event_details["lock_acquired"] = True
+            log_event_details["pid_file_written"] = False
+            log_event("LOCK_DENIED", log_event_details)
+            return False
+            
+        # Register cleanup handler
+        def cleanup_lock():
+            try:
+                debug_print(f"Cleanup: removing lock file {lock_file}")
+                file_lock.release()
+                if lock_file.exists():
+                    lock_file.unlink()
+                log_event("LOCK_RELEASED", {
+                    "process_type": process_type,
+                    "port": port,
+                    "pid": os.getpid(),
+                    "cleanup_handler": "atexit"
+                })
+            except Exception as e:
+                debug_print(f"Error removing lock file {lock_file}: {e}")
+                log_event("LOCK_RELEASE_ERROR", {
+                    "process_type": process_type,
+                    "port": port,
+                    "pid": os.getpid(),
+                    "error": str(e),
+                    "cleanup_handler": "atexit"
+                })
+                
+        atexit.register(cleanup_lock)
+        debug_print(f"Registered atexit handler to clean up lock file")
+        
+        # Success
+        debug_print(f"Lock acquired for {process_type} on port {port}")
+        log_event_details["lock_acquired"] = True
+        log_event_details["pid_file_written"] = True
+        log_event("LOCK_ACQUIRED", log_event_details)
+        return True
+        
+    except Exception as e:
+        debug_print(f"Error acquiring lock for {process_type} on port {port}: {e}")
+        log_event_details["error"] = str(e)
+        log_event("LOCK_ACQUISITION_ERROR", log_event_details)
+        return False
+
+def release_process_lock(port: int, process_type: str) -> bool:
+    """
+    Release a process lock.
+    
+    Args:
+        port: Port number
+        process_type: Type of process
+        
+    Returns:
+        bool: True if lock was released, False otherwise
+    """
+    # Create lock file path
+    locks_dir = Path('./process_locks')
+    lock_file = locks_dir / f"{process_type}_{port}.lock"
+    
+    debug_print(f"Releasing lock for {process_type} on port {port}...")
+    
+    try:
+        # Check if lock file exists
+        if not lock_file.exists():
+            debug_print(f"Lock file does not exist: {lock_file}")
+            return True
+            
+        # Check if it's our lock
+        pid_file = PidFile(lock_file)
+        data = pid_file.read()
+        
+        if data and data.get("pid") == os.getpid():
+            # It's our lock - release it
+            file_lock = FileLock(lock_file)
+            file_lock.release()
+            
+            # Remove the lock file
+            try:
+                lock_file.unlink()
+            except Exception as tmp_cleanup_err:
+                print(f"[DEBUG] Temp file removal error type: {type(tmp_cleanup_err).__name__}", file=sys.stderr)
+                print(f"[DEBUG] Temp file removal error details: {tmp_cleanup_err}", file=sys.stderr)
+                pass  # Non-critical cleanup failure
+                
+            debug_print(f"Lock released for {process_type} on port {port}")
+            log_event("LOCK_RELEASED", {
+                "process_type": process_type,
+                "port": port,
+                "pid": os.getpid(),
+                "cleanup_handler": "explicit"
+            })
+            return True
+        else:
+            # Not our lock
+            debug_print(f"Lock file {lock_file} is not owned by this process")
+            return False
+            
+    except Exception as e:
+        debug_print(f"Error releasing lock for {process_type} on port {port}: {e}")
+        log_event("LOCK_RELEASE_ERROR", {
+            "process_type": process_type,
+            "port": port,
+            "pid": os.getpid(),
+            "error": str(e),
+            "cleanup_handler": "explicit"
+        })
+        return False
+
+# Set up signal handlers for clean shutdown
+def register_signal_handlers(cleanup_func: Optional[Callable] = None):
+    """
+    Register signal handlers for clean shutdown.
+    
+    Args:
+        cleanup_func: Optional function to call during shutdown
+    """
+    def signal_handler(sig, frame):
+        """Signal handler for clean shutdown."""
+        sig_name = signal.Signals(sig).name if hasattr(signal, 'Signals') else f"Signal {sig}"
+        debug_print(f"Received signal: {sig_name}")
+        
+        # Perform custom cleanup if provided
+        if cleanup_func:
+            try:
+                cleanup_func()
+            except Exception as e:
+                debug_print(f"Error in cleanup function: {e}")
+                
+        # Log the signal event
+        log_event("SIGNAL_RECEIVED", {
+            "signal": sig_name,
+            "pid": os.getpid()
+        })
+        
+        # Exit with appropriate status code
+        if sig == signal.SIGINT:
+            sys.exit(130)  # Standard exit code for SIGINT
+        elif sig == signal.SIGTERM:
+            sys.exit(143)  # Standard exit code for SIGTERM
+        else:
+            sys.exit(1)
+    
+    # Register signal handlers
+    try:
+        for sig in [signal.SIGINT, signal.SIGTERM]:
+            signal.signal(sig, signal_handler)
+            
+        # Windows-specific CTRL_C_EVENT
+        if sys.platform == 'win32' and hasattr(signal, 'CTRL_C_EVENT'):
+            signal.signal(signal.CTRL_C_EVENT, signal_handler)
+            
+        debug_print("Registered signal handlers for clean shutdown")
+    except Exception as e:
+        debug_print(f"Error registering signal handlers: {e}")
+
+# Utility function to get process info
+def get_process_info(pid: int) -> Dict[str, Any]:
+    """
+    Get detailed information about a process.
+    
+    Args:
+        pid: Process ID
+        
+    Returns:
+        dict: Process information
+    """
+    try:
+        process = psutil.Process(pid)
+        
+        # Get process info
+        info = {
+            "pid": pid,
+            "name": process.name(),
+            "status": process.status(),
+            "create_time": datetime.datetime.fromtimestamp(process.create_time()).isoformat(),
+            "username": process.username(),
+            "terminal": getattr(process, "terminal", None),
+            "cmdline": process.cmdline()
+        }
+        
+        # Get memory and CPU info
+        try:
+            mem_info = process.memory_info()
+            info["memory"] = {
+                "rss": mem_info.rss,
+                "vms": mem_info.vms
+            }
+            
+            info["cpu_percent"] = process.cpu_percent(interval=0.1)
+        except Exception as cpu_err:
+            print(f"[DEBUG] CPU percent calculation error type: {type(cpu_err).__name__}", file=sys.stderr)
+            print(f"[DEBUG] CPU percent calculation error details: {cpu_err}", file=sys.stderr)
+            pass  # CPU percentage is optional information
+            
+        return info
+    except psutil.NoSuchProcess:
+        return {"pid": pid, "error": "Process does not exist"}
+    except psutil.AccessDenied:
+        return {"pid": pid, "error": "Access denied"}
+    except Exception as e:
+        return {"pid": pid, "error": str(e)}
+
+if __name__ == "__main__":
+    # Example usage
+    print("Process Core Utilities")
+    print("=====================")
+    
+    # Check if a process is running
+    pid = os.getpid()
+    print(f"Current process (PID {pid}) is running: {is_process_running(pid)}")
+    
+    # Test file locking
+    lock_file = Path("./test.lock")
+    lock = FileLock(lock_file)
+    with lock:
+        print(f"Lock acquired: {lock_file}")
+        print("Press Ctrl+C to release the lock and exit")
+        try:
+            time.sleep(10)
+        except KeyboardInterrupt:
+            print("Lock released due to KeyboardInterrupt")
+    
+    # Clean up
+    if lock_file.exists():
+        lock_file.unlink()

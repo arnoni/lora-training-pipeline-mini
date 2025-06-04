@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LoRA Training Pipeline Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            padding-top: 56px;
+            background-color: #f8f9fa;
+        }
+        .navbar-brand {
+            font-weight: bold;
+        }
+        .card {
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .card-header {
+            font-weight: bold;
+            background-color: #f0f0f0;
+        }
+        .dashboard-container {
+            padding: 20px;
+        }
+        .system-metric {
+            text-align: center;
+            padding: 10px;
+        }
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+        .metric-label {
+            font-size: 0.9rem;
+            color: #6c757d;
+        }
+        .progress {
+            height: 10px;
+            margin-top: 5px;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        .status-running {
+            background-color: #28a745;
+        }
+        .status-stopped {
+            background-color: #dc3545;
+        }
+        .status-waiting {
+            background-color: #ffc107;
+        }
+        .data-count {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 0;
+            color: #0d6efd;
+        }
+        .data-label {
+            color: #6c757d;
+            font-size: 0.9rem;
+        }
+        .data-card {
+            text-align: center;
+            padding: 15px;
+        }
+        .last-update {
+            text-align: right;
+            font-size: 0.8rem;
+            color: #6c757d;
+            margin-top: 8px;
+        }
+        .cycle-badge {
+            font-size: 2.5rem;
+            font-weight: bold;
+            color: #0d6efd;
+            text-align: center;
+            margin: 10px 0;
+        }
+        .process-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .error-list {
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 0.9rem;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            padding: 10px;
+        }
+        .error-item {
+            padding: 5px 0;
+            border-bottom: 1px solid #e9ecef;
+        }
+        #thresholdProgressBar {
+            height: 20px;
+        }
+        .progress-label {
+            position: absolute;
+            right: 5px;
+            color: white;
+            font-weight: bold;
+            text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.7);
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark fixed-top">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">
+                <i class="bi bi-cpu"></i> LoRA Training Pipeline Dashboard
+            </a>
+            <button class="btn btn-sm btn-outline-light" id="refreshBtn">
+                <i class="bi bi-arrow-clockwise"></i> Refresh
+            </button>
+        </div>
+    </nav>
+
+    <!-- Dashboard Content -->
+    <div class="container-fluid dashboard-container">
+        <div class="row">
+            <!-- System Stats Column -->
+            <div class="col-md-6 col-lg-3">
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-pc"></i> System Status
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-6 system-metric">
+                                <div class="metric-value" id="cpuUsage">0%</div>
+                                <div class="metric-label">CPU Usage</div>
+                                <div class="progress">
+                                    <div class="progress-bar" id="cpuBar" role="progressbar" style="width: 0%"></div>
+                                </div>
+                            </div>
+                            <div class="col-6 system-metric">
+                                <div class="metric-value" id="memoryUsage">0%</div>
+                                <div class="metric-label">Memory</div>
+                                <div class="progress">
+                                    <div class="progress-bar" id="memoryBar" role="progressbar" style="width: 0%"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row mt-3" id="gpuSection">
+                            <div class="col-6 system-metric">
+                                <div class="metric-value" id="gpuUsage">N/A</div>
+                                <div class="metric-label">GPU Memory</div>
+                                <div class="progress">
+                                    <div class="progress-bar bg-success" id="gpuBar" role="progressbar" style="width: 0%"></div>
+                                </div>
+                            </div>
+                            <div class="col-6 system-metric">
+                                <div class="metric-value" id="gpuName">-</div>
+                                <div class="metric-label">GPU</div>
+                            </div>
+                        </div>
+                        <hr>
+                        <div class="row">
+                            <div class="col-12">
+                                <small>
+                                    <strong>Hostname:</strong> <span id="hostname">-</span><br>
+                                    <strong>Platform:</strong> <span id="platform">-</span><br>
+                                    <strong>Python:</strong> <span id="pythonVersion">-</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-gear-fill"></i> Model Configuration
+                    </div>
+                    <div class="card-body">
+                        <p><strong>Base Model:</strong> <span id="baseModel">-</span></p>
+                        <p><strong>Ollama Model:</strong> <span id="ollamaModel">-</span></p>
+                        <hr>
+                        <h6>LoRA Configuration:</h6>
+                        <ul class="small">
+                            <li><strong>r:</strong> <span id="loraR">-</span></li>
+                            <li><strong>lora_alpha:</strong> <span id="loraAlpha">-</span></li>
+                            <li><strong>lora_dropout:</strong> <span id="loraDropout">-</span></li>
+                            <li><strong>task_type:</strong> <span id="loraTaskType">-</span></li>
+                            <li><strong>target_modules:</strong> <span id="loraTargetModules">-</span></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Training Info Column -->
+            <div class="col-md-6 col-lg-3">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <i class="bi bi-arrow-repeat"></i> Training Cycle Status
+                    </div>
+                    <div class="card-body text-center">
+                        <h6>Current Training Cycle</h6>
+                        <div class="cycle-badge" id="cycleCount">0</div>
+                        <p class="mb-3">
+                            <span class="badge rounded-pill bg-info" id="trainingStatus">Not running</span>
+                        </p>
+
+                        <h6>Data Progress</h6>
+                        <div class="progress mb-3" id="thresholdProgressContainer">
+                            <div class="progress-bar bg-success" id="thresholdProgressBar" role="progressbar" style="width: 0%">
+                                <span class="progress-label" id="progressLabel">0/0</span>
+                            </div>
+                        </div>
+
+                        <div class="row text-start">
+                            <div class="col-6">
+                                <small>
+                                    <strong>Current Threshold:</strong>
+                                </small>
+                            </div>
+                            <div class="col-6 text-end">
+                                <small>
+                                    <span id="currentThreshold">-</span> valid data points
+                                </small>
+                            </div>
+                        </div>
+
+                        <div class="row text-start">
+                            <div class="col-6">
+                                <small>
+                                    <strong>Valid Data Points:</strong>
+                                </small>
+                            </div>
+                            <div class="col-6 text-end">
+                                <small>
+                                    <span id="totalValidPoints">-</span>
+                                </small>
+                            </div>
+                        </div>
+
+                        <hr>
+
+                        <div class="row text-start">
+                            <div class="col-6">
+                                <small>
+                                    <strong>Last Attempt:</strong>
+                                </small>
+                            </div>
+                            <div class="col-6 text-end">
+                                <small>
+                                    <span id="lastAttemptTime">Never</span>
+                                </small>
+                            </div>
+                        </div>
+
+                        <div class="row text-start">
+                            <div class="col-6">
+                                <small>
+                                    <strong>Time Since Attempt:</strong>
+                                </small>
+                            </div>
+                            <div class="col-6 text-end">
+                                <small>
+                                    <span id="timeSinceAttempt">-</span>
+                                </small>
+                            </div>
+                        </div>
+                        
+                        <div class="row text-start">
+                            <div class="col-6">
+                                <small>
+                                    <strong>Last Success:</strong>
+                                </small>
+                            </div>
+                            <div class="col-6 text-end">
+                                <small>
+                                    <span id="lastSuccessTime">Never</span>
+                                </small>
+                            </div>
+                        </div>
+
+                        <div class="row text-start">
+                            <div class="col-6">
+                                <small>
+                                    <strong>Time Since Success:</strong>
+                                </small>
+                            </div>
+                            <div class="col-6 text-end">
+                                <small>
+                                    <span id="timeSinceSuccess">-</span>
+                                </small>
+                            </div>
+                        </div>
+
+                        <div class="row text-start">
+                            <div class="col-6">
+                                <small>
+                                    <strong>ZenML Status:</strong>
+                                </small>
+                            </div>
+                            <div class="col-6 text-end">
+                                <small>
+                                    <span id="zenmlStatus">-</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-graph-up"></i> Best Model
+                    </div>
+                    <div class="card-body" id="bestModelInfo">
+                        <div id="noBestModel" class="text-center text-muted d-none">
+                            <i class="bi bi-exclamation-circle"></i>
+                            <p>No best model available yet.<br>Complete a training cycle to generate the first model.</p>
+                        </div>
+                        <div id="bestModelDetails">
+                            <div class="row">
+                                <div class="col-6">
+                                    <strong>Validation Loss:</strong>
+                                </div>
+                                <div class="col-6 text-end">
+                                    <span id="bestModelLoss">-</span>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-6">
+                                    <strong>Model Path:</strong>
+                                </div>
+                                <div class="col-6 text-end">
+                                    <span id="bestModelPath">-</span>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-6">
+                                    <strong>Last Updated:</strong>
+                                </div>
+                                <div class="col-6 text-end">
+                                    <span id="bestModelLastUpdate">-</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-activity"></i> Process Status
+                    </div>
+                    <div class="card-body">
+                        <div class="process-list" id="processList">
+                            <div class="text-center py-4 text-muted">
+                                <i class="bi bi-hourglass"></i> Loading process data...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Data Stats Column -->
+            <div class="col-md-6 col-lg-3">
+                <div class="card">
+                    <div class="card-header bg-info text-white d-flex justify-content-between align-items-center">
+                        <div>
+                            <i class="bi bi-database"></i> Data Collection Status
+                        </div>
+                        <button id="deleteAllDatasetsBtn" class="btn btn-sm btn-danger">
+                            <i class="bi bi-trash"></i> Delete All Non-Running Datasets
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="data-card">
+                                    <p class="data-count" id="totalCollectedData">0</p>
+                                    <p class="data-label">Total Collected</p>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="data-card">
+                                    <p class="data-count text-success" id="totalValidData">0</p>
+                                    <p class="data-label">Valid Data</p>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="data-card">
+                                    <p class="data-count text-danger" id="totalRejectedData">0</p>
+                                    <p class="data-label">Rejected Data</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <h5 class="mt-3">Dataset Details</h5>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <p><strong>Dataset Name:</strong> <span id="datasetName">-</span></p>
+                                <p><strong>Version:</strong> <span id="dataVersion">-</span></p>
+                            </div>
+                            <div class="col-md-6">
+                                <p><strong>Validation Rate:</strong> <span id="validationRate">-</span>%</p>
+                            </div>
+                        </div>
+                        
+                        <hr>
+                        <h5>File Counts</h5>
+                        <div class="row">
+                            <div class="col-md-3">
+                                <p><strong>Original:</strong> <span id="originalFileCount">-</span></p>
+                            </div>
+                            <div class="col-md-3">
+                                <p><strong>Valid:</strong> <span id="cleanedFileCount">-</span></p>
+                            </div>
+                            <div class="col-md-3">
+                                <p><strong>Rejected:</strong> <span id="rejectedFileCount">-</span></p>
+                            </div>
+                            <div class="col-md-3">
+                                <p><strong>Training:</strong> <span id="trainingFileCount">-</span></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-pie-chart"></i> Data Distribution
+                    </div>
+                    <div class="card-body">
+                        <canvas id="dataDistributionChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Error Monitoring Column -->
+            <div class="col-md-6 col-lg-3">
+                <div class="card">
+                    <div class="card-header bg-danger text-white">
+                        <i class="bi bi-exclamation-triangle"></i> Error Monitoring
+                    </div>
+                    <div class="card-body">
+                        <div class="error-list" id="errorList">
+                            <div class="text-center py-4 text-muted">
+                                <i class="bi bi-hourglass"></i> Loading error data...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row">
+            <div class="col-12 last-update">
+                Last update: <span id="lastUpdateTime">-</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Global variables
+        let dataDistributionChart = null;
+        
+        // Initialize Dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            // Create Data Distribution Chart
+            initDataDistributionChart();
+            
+            // Fetch data immediately
+            fetchDashboardData();
+            
+            // Set up automatic refresh (every 10 seconds)
+            setInterval(fetchDashboardData, 10000);
+            
+            // Manual refresh button
+            document.getElementById('refreshBtn').addEventListener('click', fetchDashboardData);
+            
+            // Delete all datasets button
+            document.getElementById('deleteAllDatasetsBtn').addEventListener('click', deleteAllDatasets);
+        });
+        
+        // Initialize chart
+        function initDataDistributionChart() {
+            const ctx = document.getElementById('dataDistributionChart').getContext('2d');
+            dataDistributionChart = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: ['Valid', 'Rejected'],
+                    datasets: [{
+                        data: [0, 0],
+                        backgroundColor: ['#28a745', '#dc3545'],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const label = context.label || '';
+                                    const value = context.raw || 0;
+                                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                    const percentage = total > 0 ? Math.round((value / total) * 100) : 0;
+                                    return `${label}: ${value} (${percentage}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Main function to fetch dashboard data
+        function fetchDashboardData() {
+            fetch('/api/dashboard-data')
+                .then(response => response.json())
+                .then(data => {
+                    updateDashboard(data);
+                })
+                .catch(error => {
+                    console.error('Error fetching dashboard data:', error);
+                });
+        }
+        
+        // Function to delete all datasets
+        function deleteAllDatasets() {
+            if (!confirm('WARNING: This will delete ALL dataset files and reset counters.\nAny active training will continue using cached data.\n\nAre you sure you want to proceed?')) {
+                return;
+            }
+            
+            // Show loading state
+            const deleteBtn = document.getElementById('deleteAllDatasetsBtn');
+            const originalBtnText = deleteBtn.innerHTML;
+            deleteBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> Deleting...';
+            deleteBtn.disabled = true;
+            
+            // Call the API
+            fetch('/api/delete-datasets', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Show success message
+                    // Check if there was an error due to cleaning in progress
+                    if (data.details.status === "cleaning_in_progress") {
+                        alert(`Cannot delete datasets: ${data.details.error}\n\nPlease wait for the cleaning process to complete and try again.`);
+                    } else {
+                        let preservedMsg = "";
+                        if (data.details.training_files_preserved > 0) {
+                            preservedMsg = `\n\nPreserved ${data.details.training_files_preserved} training files for active training.`;
+                        }
+                        alert(`Datasets deleted successfully!\n\nDeleted:\n- ${data.details.original_files} original files\n- ${data.details.valid_files} valid files\n- ${data.details.invalid_files} invalid files\n- ${data.details.cleaned_files} legacy cleaned files\n- ${data.details.consolidated_files} consolidated files\n\nAll counters reset.${preservedMsg}`);
+                    }
+                    
+                    // Refresh dashboard
+                    fetchDashboardData();
+                } else {
+                    // Show error message
+                    alert(`Error: ${data.message}`);
+                }
+            })
+            .catch(error => {
+                console.error('Error deleting datasets:', error);
+                alert(`Error deleting datasets: ${error.message}`);
+            })
+            .finally(() => {
+                // Reset button state
+                deleteBtn.innerHTML = originalBtnText;
+                deleteBtn.disabled = false;
+            });
+        }
+        
+        // Update all dashboard components
+        function updateDashboard(data) {
+            updateSystemInfo(data.system_info);
+            updateModelInfo(data.model_info);
+            updateTrainingInfo(data.training_info);
+            updateDataInfo(data.data_info);
+            updateProcessInfo(data.processes_info);
+            updateErrorInfo(data.errors_info);
+            
+            // Update last update timestamp
+            const lastUpdateTime = new Date(data.last_update * 1000).toLocaleTimeString();
+            document.getElementById('lastUpdateTime').textContent = lastUpdateTime;
+        }
+        
+        // Update system information section
+        function updateSystemInfo(info) {
+            // Basic system info
+            document.getElementById('cpuUsage').textContent = `${info.cpu_usage}%`;
+            document.getElementById('cpuBar').style.width = `${info.cpu_usage}%`;
+            
+            document.getElementById('memoryUsage').textContent = `${info.memory_usage}%`;
+            document.getElementById('memoryBar').style.width = `${info.memory_usage}%`;
+            
+            document.getElementById('hostname').textContent = info.hostname;
+            document.getElementById('platform').textContent = info.platform;
+            document.getElementById('pythonVersion').textContent = info.python_version;
+            
+            // GPU info (if available)
+            if (info.gpu_available) {
+                document.getElementById('gpuSection').classList.remove('d-none');
+                document.getElementById('gpuName').textContent = info.gpu_name;
+                
+                if (info.gpu_memory_percent !== undefined) {
+                    document.getElementById('gpuUsage').textContent = `${info.gpu_memory_percent}%`;
+                    document.getElementById('gpuBar').style.width = `${info.gpu_memory_percent}%`;
+                } else if (info.gpu_memory_allocated !== undefined) {
+                    document.getElementById('gpuUsage').textContent = `${info.gpu_memory_allocated}GB`;
+                    // Assuming 16GB GPU
+                    const percentage = Math.min(info.gpu_memory_allocated / 16 * 100, 100);
+                    document.getElementById('gpuBar').style.width = `${percentage}%`;
+                }
+            } else {
+                document.getElementById('gpuSection').classList.add('d-none');
+            }
+        }
+        
+        // Update model information section
+        function updateModelInfo(info) {
+            document.getElementById('baseModel').textContent = info.base_model_name;
+            document.getElementById('ollamaModel').textContent = info.ollama_model_name;
+            
+            // LoRA config
+            if (info.lora_config) {
+                document.getElementById('loraR').textContent = info.lora_config.r;
+                document.getElementById('loraAlpha').textContent = info.lora_config.lora_alpha;
+                document.getElementById('loraDropout').textContent = info.lora_config.lora_dropout;
+                document.getElementById('loraTaskType').textContent = info.lora_config.task_type;
+                document.getElementById('loraTargetModules').textContent = JSON.stringify(info.lora_config.target_modules);
+            }
+            
+            // Best model info
+            if (info.best_model) {
+                document.getElementById('noBestModel').classList.add('d-none');
+                document.getElementById('bestModelDetails').classList.remove('d-none');
+                
+                // Handle potential non-number val_loss
+                try {
+                    const valLoss = parseFloat(info.best_model.val_loss);
+                    document.getElementById('bestModelLoss').textContent = isNaN(valLoss) ? 
+                        info.best_model.val_loss : valLoss.toFixed(4);
+                } catch (e) {
+                    document.getElementById('bestModelLoss').textContent = info.best_model.val_loss;
+                }
+                
+                // Safely handle path
+                try {
+                    const path = info.best_model.path || '';
+                    const pathParts = path.split('/');
+                    document.getElementById('bestModelPath').textContent = pathParts.length ? 
+                        pathParts[pathParts.length - 1] : path;
+                } catch (e) {
+                    document.getElementById('bestModelPath').textContent = info.best_model.path || 'Unknown';
+                }
+                
+                document.getElementById('bestModelLastUpdate').textContent = info.best_model.formatted_time || 'Unknown';
+            } else {
+                document.getElementById('noBestModel').classList.remove('d-none');
+                document.getElementById('bestModelDetails').classList.add('d-none');
+            }
+        }
+        
+        // Update training information section
+        function updateTrainingInfo(info) {
+            document.getElementById('cycleCount').textContent = info.cycle_count;
+            document.getElementById('currentThreshold').textContent = info.current_threshold;
+            document.getElementById('totalValidPoints').textContent = info.total_valid_data_points;
+            
+            // Update training timestamps
+            document.getElementById('lastAttemptTime').textContent = info.last_attempt_formatted || "Never";
+            document.getElementById('timeSinceAttempt').textContent = info.time_since_attempt_formatted || "-";
+            document.getElementById('lastSuccessTime').textContent = info.last_success_formatted || "Never";
+            document.getElementById('timeSinceSuccess').textContent = info.time_since_success_formatted || "-";
+            
+            // For backward compatibility
+            if (document.getElementById('lastTrainingTime')) {
+                document.getElementById('lastTrainingTime').textContent = info.last_training_formatted;
+            }
+            if (document.getElementById('timeSinceTraining')) {
+                document.getElementById('timeSinceTraining').textContent = info.time_since_formatted;
+            }
+            
+            // Training status badge
+            const trainingStatus = document.getElementById('trainingStatus');
+            if (info.training_lock) {
+                trainingStatus.textContent = 'Training Running';
+                trainingStatus.classList.remove('bg-info', 'bg-danger');
+                trainingStatus.classList.add('bg-success');
+            } else if (info.training_success) {
+                trainingStatus.textContent = 'Last Training Succeeded';
+                trainingStatus.classList.remove('bg-info', 'bg-danger');
+                trainingStatus.classList.add('bg-success');
+            } else if (info.last_training_attempt_time > 0) {
+                trainingStatus.textContent = 'Last Training Failed';
+                trainingStatus.classList.remove('bg-info', 'bg-success');
+                trainingStatus.classList.add('bg-danger');
+            } else {
+                trainingStatus.textContent = 'Not Training';
+                trainingStatus.classList.remove('bg-success', 'bg-danger');
+                trainingStatus.classList.add('bg-info');
+            }
+            
+            // ZenML status
+            const zenmlStatus = document.getElementById('zenmlStatus');
+            if (info.zenml_connected) {
+                zenmlStatus.textContent = 'Connected';
+                zenmlStatus.classList.remove('text-danger');
+                zenmlStatus.classList.add('text-success');
+            } else {
+                zenmlStatus.textContent = 'Disconnected';
+                zenmlStatus.classList.remove('text-success');
+                zenmlStatus.classList.add('text-danger');
+            }
+            
+            // Progress bar
+            const progressBar = document.getElementById('thresholdProgressBar');
+            const progressLabel = document.getElementById('progressLabel');
+            const validData = info.total_valid_data_points || 0;
+            const threshold = info.current_threshold || 10;
+            
+            // Calculate percentage (max 100%)
+            const percentage = Math.min(validData / threshold * 100, 100);
+            progressBar.style.width = `${percentage}%`;
+            progressLabel.textContent = `${validData}/${threshold}`;
+            
+            // Change color based on progress
+            if (percentage >= 100) {
+                progressBar.classList.remove('bg-warning', 'bg-danger');
+                progressBar.classList.add('bg-success');
+            } else if (percentage >= 50) {
+                progressBar.classList.remove('bg-success', 'bg-danger');
+                progressBar.classList.add('bg-warning');
+            } else {
+                progressBar.classList.remove('bg-success', 'bg-warning');
+                progressBar.classList.add('bg-danger');
+            }
+        }
+        
+        // Update data information section
+        function updateDataInfo(info) {
+            document.getElementById('totalCollectedData').textContent = info.total_collected;
+            document.getElementById('totalValidData').textContent = info.total_valid;
+            document.getElementById('totalRejectedData').textContent = info.total_rejected;
+            
+            document.getElementById('datasetName').textContent = info.dataset_name;
+            document.getElementById('dataVersion').textContent = info.data_version;
+            document.getElementById('validationRate').textContent = info.validation_rate;
+            
+            document.getElementById('originalFileCount').textContent = info.collected_files_count;
+            document.getElementById('cleanedFileCount').textContent = info.valid_files_count || info.cleaned_files_count;
+            document.getElementById('rejectedFileCount').textContent = info.invalid_files_count || info.rejected_files_count;
+            document.getElementById('trainingFileCount').textContent = info.training_files_count || 0;
+            
+            // Update chart
+            if (dataDistributionChart) {
+                dataDistributionChart.data.datasets[0].data = [
+                    info.total_valid,
+                    info.total_rejected
+                ];
+                dataDistributionChart.update();
+            }
+        }
+        
+        // Update process information section
+        function updateProcessInfo(info) {
+            const processList = document.getElementById('processList');
+            processList.innerHTML = '';
+            
+            if (!info.processes || info.processes.length === 0) {
+                processList.innerHTML = `
+                    <div class="text-center py-4 text-muted">
+                        <i class="bi bi-exclamation-circle"></i>
+                        <p>No pipeline processes detected.</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            // Grouping processes by type for better organization
+            const processGroups = {};
+            info.processes.forEach(process => {
+                if (!processGroups[process.type]) {
+                    processGroups[process.type] = [];
+                }
+                processGroups[process.type].push(process);
+            });
+            
+            // Create process list HTML
+            for (const [type, processes] of Object.entries(processGroups)) {
+                const header = document.createElement('h6');
+                header.className = 'mt-2';
+                header.textContent = type;
+                processList.appendChild(header);
+                
+                const list = document.createElement('ul');
+                list.className = 'list-group list-group-flush small';
+                
+                processes.forEach(process => {
+                    const item = document.createElement('li');
+                    item.className = 'list-group-item d-flex justify-content-between align-items-center p-2';
+                    
+                    const statusClass = process.status === 'running' ? 
+                        'status-running' : (process.status === 'sleeping' ? 'status-waiting' : 'status-stopped');
+                    
+                    item.innerHTML = `
+                        <div>
+                            <span class="status-indicator ${statusClass}"></span>
+                            <span>PID: ${process.pid}</span>
+                        </div>
+                        <div>
+                            <span class="badge bg-secondary">${process.running_time_formatted}</span>
+                            <span class="badge bg-info">${process.memory_mb} MB</span>
+                        </div>
+                    `;
+                    
+                    list.appendChild(item);
+                });
+                
+                processList.appendChild(list);
+            }
+            
+            // Add missing processes warning
+            if (info.missing_processes && info.missing_processes.length > 0) {
+                const missingHeader = document.createElement('h6');
+                missingHeader.className = 'mt-3 text-danger';
+                missingHeader.textContent = 'Missing Processes';
+                processList.appendChild(missingHeader);
+                
+                const missingList = document.createElement('ul');
+                missingList.className = 'list-group list-group-flush small';
+                
+                info.missing_processes.forEach(type => {
+                    const item = document.createElement('li');
+                    item.className = 'list-group-item p-2 text-danger';
+                    item.innerHTML = `
+                        <i class="bi bi-exclamation-triangle-fill"></i> ${type} not running
+                    `;
+                    missingList.appendChild(item);
+                });
+                
+                processList.appendChild(missingList);
+            }
+        }
+        
+        // Update error information section
+        function updateErrorInfo(info) {
+            const errorList = document.getElementById('errorList');
+            errorList.innerHTML = '';
+            
+            const errors = info.pending_errors || [];
+            
+            if (errors.length === 0 || (errors.length === 1 && errors[0].includes("No errors found"))) {
+                errorList.innerHTML = `
+                    <div class="text-center py-4 text-success">
+                        <i class="bi bi-check-circle"></i>
+                        <p>No pending errors!</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            errors.forEach((error, index) => {
+                const errorItem = document.createElement('div');
+                errorItem.className = 'error-item';
+                
+                // Apply different styling based on error severity
+                if (error.includes("CRITICAL:")) {
+                    errorItem.classList.add('text-danger');
+                    errorItem.innerHTML = `<i class="bi bi-x-circle-fill"></i> ${error}`;
+                } else {
+                    errorItem.innerHTML = error;
+                }
+                
+                errorList.appendChild(errorItem);
+            });
+        }
+    </script>
+</body>
+</html>
