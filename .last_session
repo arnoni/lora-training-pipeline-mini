@@ -1,0 +1,20 @@
+{
+  "session_id": "20250522_122804_c12f725a",
+  "pid": 44712,
+  "start_time": "2025-05-22T12:28:16.582817",
+  "python_executable": "C:\\Users\\arnon\\Documents\\dev\\projects\\incoming\\LoRA_Training_Pipeline\\.venv\\Scripts\\python.exe",
+  "python_version": "3.12.8",
+  "cwd": "C:\\Users\\arnon\\Documents\\dev\\projects\\incoming\\LoRA_Training_Pipeline",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "system": "Windows",
+  "release": "11",
+  "training_cycle": 0,
+  "environment": {
+    "PATH": "C:\\Users\\arnon\\Documents\\dev\\projects\\incoming\\LoRA_Training_Pipeline\\.venv/Scripts;C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.5.1.0_x64__8wekyb3d8bbwe;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\OpenSSH\\;C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common;C:\\Program Files\\Git\\cmd;C:\\Program Files\\NVIDIA Corporation\\NVIDIA app\\NvDLISR;C:\\Program Files\\Docker\\Docker\\resources\\bin;C:\\Users\\arnon\\.local\\bin;C:\\Users\\arnon\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\arnon\\AppData\\Local\\Programs\\Ollama;C:\\Users\\arnon\\AppData\\Local\\Programs\\Microsoft VS Code\\bin",
+    "VIRTUAL_ENV": "C:\\Users\\arnon\\Documents\\dev\\projects\\incoming\\LoRA_Training_Pipeline\\.venv",
+    "STOP_INFERENCE_ON_EXIT": "false"
+  },
+  "end_time": "2025-05-22T12:28:46.278925",
+  "status": "clean_shutdown",
+  "shutdown_signal": "SIGINT (Ctrl+C)"
+}

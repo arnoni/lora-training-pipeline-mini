@@ -1,0 +1,51 @@
+# LoRA_Training_Pipeline/pyproject.toml
+
+[project]
+name = "lora-training-pipeline"
+version = "0.1.0"
+description = "LoRA Training Pipeline for Fine-Tuning Large Language Models"
+authors = [{name = "Your Name", email = "your.email@example.com"}]
+readme = "README.md"
+requires-python = ">=3.8"  # Good practice: specify minimum Python version
+dependencies = [
+    "zenml~=0.74.0",        # Use ~= for PEP 508 compatibility
+    "torch[cuda]~=2.6.0",    # This is already PEP 508 compliant
+    "transformers~=4.49.0", # Use ~=
+    "peft~=0.14.0",         # Use ~=
+    "fastapi~=0.115.8",    # Use ~=
+    "gradio~=5.17.1",    # This is already PEP 508 compliant
+    "ray[tune]~=2.42.1",    # Use ~=
+    "polars~=1.23.0",     # Use ~=
+    "mlflow~=2.20.2",       # Use ~=
+    "dvc~=3.59.1",           # More specific versioning (and PEP 508 compliant)
+    "uvicorn[standard]~=0.34.0",  # Use ~=
+    "httpx~=0.27.2",       # Use ~=
+    "scikit-learn~=1.6.1", # Use ~=
+    "tenacity~=9.0.0",     # Use ~=
+    "datasets~=3.3.2",    # Use ~=
+    "trl~=0.15.1",          # Use ~=
+    "gputil~=1.4.0",       # Use ~=
+    "accelerate~=1.4.0",  # Use ~=
+    "pandas~=2.2.3",    # Use ~=
+    "lightning~=2.5.0", #Use ~=
+    "ray[train]~=2.42.1",   # Use ~=
+    "ollama~=0.3.3",        # Use ~=; Added ollama, and made PEP 508 compliant
+    "flask~=2.3.3",         # Added for dashboard
+    "psutil~=5.9.5"         # Added for system monitoring
+]
+
+[project.optional-dependencies]
+dev = ["pytest~=7.0"]  # Use ~= for consistency
+
+[build-system]
+requires = ["hatchling"]  # Use Hatchling
+build-backend = "hatchling.build" # Use Hatchling
+
+[tool.hatch.version]
+path = "src/lora_training_pipeline/__version__.py"  # Path to version file
+
+[tool.hatch.build.targets.sdist]
+include = ["/src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lora_training_pipeline"]

@@ -1,0 +1,12 @@
+{
+  "cycle_count": 0,
+  "total_valid_data_points": 0,
+  "last_training_time": 1742565715.6680737,
+  "last_valid_count": 9,
+  "total_original_files": 13,
+  "total_valid_files": 9,
+  "total_invalid_files": 4,
+  "last_scan_time": 1744296030,
+  "last_training_attempt_time": 1748523897.9840508,
+  "training_success": false
+}
